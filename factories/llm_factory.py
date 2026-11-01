@@ -26,7 +26,7 @@ class LLMFactory:
             raise ValueError(f"Unknown LLM service type: {service_type}")
     
     @staticmethod
-    def create_query_enhancement_service(service_type: str, **kwargs) -> QueryEnhancementService:
+    def create_query_enhancer(service_type: str, **kwargs) -> QueryEnhancementService:
         service_type = service_type.lower()
         
         if service_type == "openai":
@@ -38,6 +38,9 @@ class LLMFactory:
         else:
             raise ValueError(f"Unknown query enhancement service type: {service_type}")
     
+    # Kept for callers of the older name
+    create_query_enhancement_service = create_query_enhancer
+
     @staticmethod
     def get_available_services():
         return ["openai", "ollama", "perplexity"]
@@ -45,8 +48,8 @@ class LLMFactory:
     @staticmethod
     def get_service_info(service_type: str) -> dict:
         service_info = {
-            "openai": {"name": "OpenAI GPT-4", "description": "High-quality analysis with GPT-4"},
-            "perplexity": {"name": "Perplexity AI", "description": "Fast analysis with Llama models"},
+            "openai": {"name": "OpenAI", "description": "High-quality analysis with OpenAI chat models"},
+            "perplexity": {"name": "Perplexity AI", "description": "Analysis with Perplexity Sonar models"},
             "ollama": {"name": "Ollama Local", "description": "Local analysis with open-source models"}
         }
         return service_info.get(service_type.lower(), {

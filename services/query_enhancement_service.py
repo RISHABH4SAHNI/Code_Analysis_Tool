@@ -5,12 +5,22 @@ from typing import Dict, Any, Optional
 import openai
 import requests
 import os
+import re
 from config.settings import OPENAI_CONFIG, PERPLEXITY_CONFIG, OLLAMA_CONFIG, MAX_QUERY_LENGTH
 
 class QueryEnhancementService(ABC):
     @abstractmethod
     def enhance_query(self, query: str, context: Optional[Dict[str, Any]] = None) -> str:
         pass
+
+    @staticmethod
+    def _clean_enhanced_query(enhanced: str, original: str) -> str:
+        """Strip labels and quotes models often wrap around the rewritten query"""
+        enhanced = re.sub(r'^\s*\**\s*enhanced query\s*:?\**\s*', '', enhanced or '', flags=re.IGNORECASE)
+        enhanced = enhanced.strip().strip('"').strip()
+        if not enhanced:
+            return original
+        return enhanced[:MAX_QUERY_LENGTH * 2]
 
 class OpenAIQueryEnhancementService(QueryEnhancementService):
     def __init__(self, api_key: Optional[str] = None):
@@ -42,12 +52,11 @@ class OpenAIQueryEnhancementService(QueryEnhancementService):
                         {"role": "system", "content": "Enhance technical queries with relevant context while preserving original intent."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=self.config.get('max_tokens', 200),
+                    max_tokens=self.config['enhancement_max_tokens'],
                     temperature=self.config.get('temperature', 0.1),
                     timeout=self.timeout
                 )
-                enhanced = response.choices[0].message.content.strip()
-                return enhanced if enhanced else query
+                return self._clean_enhanced_query(response.choices[0].message.content, query)
             except openai.RateLimitError:
                 if attempt < self.max_retries - 1:
                     wait_time = 2 ** attempt
@@ -55,6 +64,9 @@ class OpenAIQueryEnhancementService(QueryEnhancementService):
                     time.sleep(wait_time)
                     continue
                 self.logger.warning("Rate limit exceeded, returning original query")
+                return query
+            except openai.AuthenticationError as e:
+                self.logger.error(f"Query enhancement failed, check OPENAI_API_KEY: {e}")
                 return query
             except Exception as e:
                 self.logger.error(f"Query enhancement failed (attempt {attempt + 1}): {e}")
@@ -78,7 +90,7 @@ class OpenAIQueryEnhancementService(QueryEnhancementService):
 Original Query: {query}
 
 Enhance this query with technical context for better code search. Preserve all original terms and add relevant technical concepts.
-Enhanced Query:"""
+Reply with the enhanced query only."""
 
 class PerplexityQueryEnhancementService(QueryEnhancementService):
     def __init__(self, api_key: Optional[str] = None):
@@ -108,14 +120,14 @@ class PerplexityQueryEnhancementService(QueryEnhancementService):
                 json={
                     "model": self.config['chat_model'],
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": self.config.get('max_tokens', 200),
+                    "max_tokens": self.config['enhancement_max_tokens'],
                     "temperature": self.config.get('temperature', 0.1)
                 },
                 timeout=self.timeout
             )
             if response.status_code == 200:
-                enhanced = response.json()['choices'][0]['message']['content'].strip()
-                return enhanced if enhanced else query
+                return self._clean_enhanced_query(response.json()['choices'][0]['message']['content'], query)
+            self.logger.warning(f"Perplexity query enhancement returned HTTP {response.status_code}")
         except Exception as e:
             self.logger.error(f"Perplexity query enhancement failed: {e}")
         
@@ -133,7 +145,8 @@ class PerplexityQueryEnhancementService(QueryEnhancementService):
                 context_items.append(f"Priority: {context['priority']}")
             context_str = " | ".join(context_items) + " | " if context_items else ""
         
-        return f"Enhance this technical query with context: {context_str}{query}"
+        return (f"Rewrite this bug report as a code search query. Keep every original term and add relevant "
+                f"technical terms. Reply with the query only.\n{context_str}{query}")
 
 class OllamaQueryEnhancementService(QueryEnhancementService):
     def __init__(self, base_url: str = None):
@@ -160,18 +173,19 @@ class OllamaQueryEnhancementService(QueryEnhancementService):
                     "stream": False,
                     "options": {
                         "temperature": self.config.get('temperature', 0.1),
-                        "max_tokens": self.config.get('max_tokens', 200)
+                        "num_predict": self.config['enhancement_max_tokens']
                     }
                 },
                 timeout=self.timeout
             )
             if response.status_code == 200:
-                enhanced = response.json().get('response', query).strip()
-                return enhanced if enhanced else query
+                return self._clean_enhanced_query(response.json().get('response', ''), query)
+            self.logger.warning(f"Ollama query enhancement returned HTTP {response.status_code}")
         except Exception as e:
             self.logger.error(f"Ollama query enhancement failed: {e}")
         
         return query
 
     def _build_enhancement_prompt(self, query: str, context: Optional[Dict[str, Any]]) -> str:
-        return f"Enhance this technical code search query with relevant programming context: {query}"
+        return ("Rewrite this bug report as a code search query. Keep every original term and add relevant "
+                f"programming terms. Reply with the query only.\n{query}")

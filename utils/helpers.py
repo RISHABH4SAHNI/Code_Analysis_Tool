@@ -2,40 +2,31 @@ import os
 import re
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from config.settings import EXCLUDED_DIRS, TEST_DIRS
 
 def validate_repository_path(repo_path: str) -> bool:
     """Validate if the given path is a valid repository"""
     if not repo_path or not os.path.exists(repo_path):
         return False
     
-    path = Path(repo_path)
-    return path.is_dir() and any(path.rglob("*.py"))
+    return Path(repo_path).is_dir() and bool(get_python_files(repo_path, include_tests=True))
 
-def get_python_files(repo_path: str, exclude_patterns: List[str] = None) -> List[str]:
-    """Get all Python files from repository excluding test files and common excludes"""
-    if exclude_patterns is None:
-        exclude_patterns = [
-            r'test_.*\.py$',
-            r'.*_test\.py$',
-            r'.*/tests/.*',
-            r'.*/test/.*',
-            r'.*/__pycache__/.*',
-            r'.*/\.git/.*',
-            r'.*/venv/.*',
-            r'.*/env/.*'
-        ]
-    
+def get_python_files(repo_path: str, include_tests: bool = False) -> List[str]:
+    """Get all Python files in a repository, skipping virtualenvs, caches and (by default) tests"""
     python_files = []
     for root, dirs, files in os.walk(repo_path):
-        # Skip excluded directories
-        dirs[:] = [d for d in dirs if not any(re.match(pattern, os.path.join(root, d)) for pattern in exclude_patterns)]
-        
-        for file in files:
-            if file.endswith('.py'):
-                file_path = os.path.join(root, file)
-                # Check if file matches any exclude pattern
-                if not any(re.match(pattern, file_path) for pattern in exclude_patterns):
-                    python_files.append(file_path)
+        dirs[:] = sorted(
+            d for d in dirs
+            if d not in EXCLUDED_DIRS and not d.endswith('.egg-info')
+            and (include_tests or d not in TEST_DIRS)
+        )
+        for file in sorted(files):
+            if not file.endswith('.py'):
+                continue
+            file_path = os.path.join(root, file)
+            # Relative path, so a repo that itself lives under a "test" folder is not skipped
+            if include_tests or not is_test_file(os.path.relpath(file_path, repo_path)):
+                python_files.append(file_path)
     
     return python_files
 
@@ -91,7 +82,9 @@ def get_file_extension(file_path: str) -> str:
 
 def is_test_file(file_path: str) -> bool:
     """Check if file is a test file"""
-    file_name = Path(file_path).name.lower()
-    return (file_name.startswith('test_') or 
-            file_name.endswith('_test.py') or 
-            'test' in Path(file_path).parts)
+    path = Path(file_path)
+    file_name = path.name.lower()
+    return (file_name.startswith('test_') or
+            file_name.endswith('_test.py') or
+            file_name == 'conftest.py' or
+            any(part in TEST_DIRS for part in path.parts[:-1]))

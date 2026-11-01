@@ -52,29 +52,32 @@ class TestServiceFactory:
             assert service_name in services
             assert services[service_name] is not None
         
-        # Verify factory methods were called
+        # One embedding service, shared by the engine and the search service
         mock_embedding_service.assert_called_once_with("openai")
+        assert services['search_service'].embedding_service is services['embedding_service']
+        # The search service must search the same graph the engine exposes
+        assert services['search_service'].call_graph_processor is services['call_graph_processor']
         mock_analysis_service.assert_called_once_with("openai")
         mock_query_enhancer.assert_called_once_with("openai")
     
     @patch('factories.embedding_factory.EmbeddingFactory.create_service')
     @patch('factories.llm_factory.LLMFactory.create_analysis_service')
     @patch('factories.llm_factory.LLMFactory.create_query_enhancer')
-    def test_get_services_for_vector_search_approach(self,
+    def test_get_services_for_lookup_table_approach(self,
                                                      mock_query_enhancer,
                                                      mock_analysis_service,
                                                      mock_embedding_service):
-        """Test service creation for vector_search approach"""
+        """Test service creation for function_lookup_table approach"""
         # Setup mocks
         mock_embedding_service.return_value = Mock()
         mock_analysis_service.return_value = Mock()
         mock_query_enhancer.return_value = Mock()
         
         services = self.factory.get_services_for_approach(
-            "vector_search", "openai", "openai"
+            "function_lookup_table", "openai", "openai"
         )
         
-        # Check required services for vector search
+        # Check required services for the lookup table approach
         required_services = [
             'repository_processor', 'embedding_service', 'search_service',
             'query_enhancer', 'analysis_service', 'lookup_table'
@@ -84,7 +87,7 @@ class TestServiceFactory:
             assert service_name in services
             assert services[service_name] is not None
         
-        # Should not have call_graph_processor for vector search
+        # Should not have call_graph_processor for the lookup table approach
         assert 'call_graph_processor' not in services
     
     def test_get_supported_approaches(self):

@@ -2,6 +2,7 @@ import pytest
 import json
 import os
 import tempfile
+import glob
 from unittest.mock import Mock, patch
 from utils.history_manager import HistoryManager
 from datetime import datetime
@@ -27,13 +28,13 @@ class TestHistoryManager:
         }
     
     def teardown_method(self):
-        """Clean up temporary files"""
-        if os.path.exists(self.temp_file.name):
-            os.unlink(self.temp_file.name)
+        """Clean up the history file and the backup/temp files saved next to it"""
+        for path in glob.glob(self.temp_file.name + "*"):
+            os.unlink(path)
     
     def test_history_manager_initialization(self):
         """Test history manager initializes correctly"""
-        assert self.history_manager.history_file == self.temp_file.name
+        assert str(self.history_manager.history_file) == self.temp_file.name
         assert os.path.exists(self.temp_file.name)
     
     def test_add_analysis(self):
@@ -149,7 +150,8 @@ class TestHistoryManager:
         export_file.close()
         
         try:
-            self.history_manager.export_history(export_file.name)
+            exported_path = self.history_manager.export_history(export_file.name)
+            assert exported_path == os.path.realpath(export_file.name)
             
             # Verify export file exists and has correct content
             assert os.path.exists(export_file.name)
@@ -183,3 +185,12 @@ class TestHistoryManager:
         new_manager = HistoryManager(self.temp_file.name)
         stats = new_manager.get_statistics()
         assert stats["total_analyses"] == 0
+
+    def test_ids_stay_unique_after_trimming(self):
+        """IDs must not repeat once old entries are dropped to respect max_entries"""
+        self.history_manager.max_entries = 2
+        for _ in range(4):
+            self.history_manager.add_analysis(**self.sample_analysis)
+        
+        ids = [a["id"] for a in self.history_manager.get_all_analyses()]
+        assert ids == [3, 4]

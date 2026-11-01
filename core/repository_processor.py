@@ -1,174 +1,193 @@
 import os
 import ast
 import uuid
+import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from models.function_model import FunctionMetadata
+from core.call_resolver import CallResolver
+from utils.helpers import get_python_files
 
 class RepositoryProcessor:
     def __init__(self):
-        self.function_lookup = {}
-        self.builtin_functions = {
-            'abs', 'all', 'any', 'ascii', 'bin', 'bool', 'breakpoint', 'bytearray', 'bytes',
-            'callable', 'chr', 'classmethod', 'compile', 'complex', 'delattr', 'dict', 'dir',
-            'divmod', 'enumerate', 'eval', 'exec', 'filter', 'float', 'format', 'frozenset',
-            'getattr', 'globals', 'hasattr', 'hash', 'help', 'hex', 'id', 'input', 'int',
-            'isinstance', 'issubclass', 'iter', 'len', 'list', 'locals', 'map', 'max',
-            'memoryview', 'min', 'next', 'object', 'oct', 'open', 'ord', 'pow', 'print',
-            'property', 'range', 'repr', 'reversed', 'round', 'set', 'setattr', 'slice',
-            'sorted', 'staticmethod', 'str', 'sum', 'super', 'tuple', 'type', 'vars', 'zip'
-        }
+        self.logger = logging.getLogger(__name__)
+        self.skipped_files: List[Dict[str, str]] = []
 
-    def process_repository(self, repo_path: str) -> List[FunctionMetadata]:
+    def process_repository(self, repo_path: str, include_tests: bool = False,
+                           max_functions: Optional[int] = None) -> List[FunctionMetadata]:
         functions = []
-        python_files = self._get_python_files(repo_path)
-        
+        self.skipped_files = []
+        python_files = get_python_files(repo_path, include_tests=include_tests)
+
         for file_path in python_files:
-            file_functions = self._process_file(file_path, repo_path)
-            functions.extend(file_functions)
-        
+            functions.extend(self._process_file(file_path, repo_path))
+            if max_functions and len(functions) >= max_functions:
+                self.logger.warning(f"Reached max_functions={max_functions}; remaining files skipped")
+                functions = functions[:max_functions]
+                break
+
+        if self.skipped_files:
+            self.logger.warning(f"Skipped {len(self.skipped_files)} file(s) that could not be parsed")
+
         self._build_nested_call_relationships(functions)
         return functions
-
-    def _get_python_files(self, repo_path: str) -> List[str]:
-        python_files = []
-        excluded_dirs = {'tests', 'test', '.git', 'venv', '__pycache__', '.pytest_cache'}
-        
-        for root, dirs, files in os.walk(repo_path):
-            dirs[:] = [d for d in dirs if d not in excluded_dirs]
-            for file in files:
-                if file.endswith('.py') and not file.startswith('test_'):
-                    python_files.append(os.path.join(root, file))
-        
-        return python_files
 
     def _process_file(self, file_path: str, repo_path: str) -> List[FunctionMetadata]:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 source_code = f.read()
-            
-            tree = ast.parse(source_code)
-            extractor = FunctionExtractor(file_path, repo_path, source_code)
-            return extractor.extract_functions(tree)
-        except Exception:
+            tree = ast.parse(source_code, filename=file_path)
+        except (SyntaxError, UnicodeDecodeError, OSError, ValueError) as e:
+            self.logger.warning(f"Skipping {file_path}: {e}")
+            self.skipped_files.append({"file": file_path, "error": str(e)})
             return []
 
-    def _build_nested_call_relationships(self, functions: List[FunctionMetadata]):
-        for func in functions:
-            nested_ids = []
-            for call in func.calls:
-                if call not in self.builtin_functions:
-                    for other_func in functions:
-                        if other_func.name == call and other_func.lookup_id != func.lookup_id:
-                            nested_ids.append(other_func.lookup_id)
-            func.nested_call_ids = nested_ids
+        extractor = FunctionExtractor(file_path, repo_path, source_code)
+        return extractor.extract_functions(tree)
 
-class FunctionExtractor:
+    def _build_nested_call_relationships(self, functions: List[FunctionMetadata]):
+        resolver = CallResolver(functions)
+        for func in functions:
+            func.nested_call_ids = resolver.resolve(func)
+
+class FunctionExtractor(ast.NodeVisitor):
     def __init__(self, file_path: str, repo_path: str, source_code: str):
         self.file_path = file_path
         self.repo_path = repo_path
         self.source_code = source_code
-        self.imports = []
-        self.current_class = None
+        self.repo_name = Path(repo_path).resolve().name
+        relative_path = os.path.relpath(file_path, repo_path)
+        self.relative_path = relative_path.replace(os.sep, '/')
+        self.module_name = self.relative_path.removesuffix('.py').replace('/', '.')
+        self.imports: List[str] = []
+        self.class_stack: List[str] = []
+        self.function_stack: List[str] = []
+        self.functions: List[FunctionMetadata] = []
 
     def extract_functions(self, tree: ast.AST) -> List[FunctionMetadata]:
-        functions = []
+        self.imports = self._collect_imports(tree)
+        self.visit(tree)
+        return self.functions
+
+    def _collect_imports(self, tree: ast.AST) -> List[str]:
+        imports = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                for alias in node.names:
-                    self.imports.append(alias.name)
+                imports.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 for alias in node.names:
-                    self.imports.append(f"{module}.{alias.name}" if module else alias.name)
-            elif isinstance(node, ast.ClassDef):
-                self.current_class = node.name
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                func_metadata = self._extract_function_metadata(node)
-                if func_metadata:
-                    functions.append(func_metadata)
-        return functions
+                    imports.append(f"{module}.{alias.name}" if module else alias.name)
+        return imports
 
-    def _extract_function_metadata(self, node: ast.FunctionDef) -> FunctionMetadata:
-        lookup_id = str(uuid.uuid4())
-        repo_name = Path(self.repo_path).name
-        module_name = os.path.relpath(self.file_path, self.repo_path).replace('/', '.').replace('.py', '')
-        
-        calls = self._extract_calls(node)
-        decorators = [self._get_decorator_name(d) for d in node.decorator_list]
-        error_handling = self._extract_error_handling(node)
-        
-        source_lines = self.source_code.split('\n')
+    def visit_ClassDef(self, node: ast.ClassDef):
+        self.class_stack.append(node.name)
+        self.generic_visit(node)
+        self.class_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        self._visit_function(node)
+
+    def _visit_function(self, node):
+        self.functions.append(self._extract_function_metadata(node))
+        # Methods of a class nested inside a function still belong to that class,
+        # but a function nested in a method is not itself a method
+        saved_classes = self.class_stack
+        self.class_stack = []
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+        self.class_stack = saved_classes
+
+    def _make_lookup_id(self, node) -> str:
+        # Deterministic so re-processing a repository overwrites documents instead of duplicating them
+        qualified_name = '.'.join(self.class_stack + self.function_stack + [node.name])
+        key = f"{self.repo_name}/{self.relative_path}::{qualified_name}:{node.lineno}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+    def _extract_function_metadata(self, node) -> FunctionMetadata:
+        qualified_calls = self._extract_calls(node)
         start_line = node.lineno
         end_line = node.end_lineno or node.lineno
         code = ast.get_source_segment(self.source_code, node) or ""
-        line_numbers = list(range(start_line, end_line + 1))
-        
-        file_name = self.file_path.split('/')[-1] if self.file_path else ""
-        
-        code_with_line_numbers = ""
-        if code:
-            lines = code.split('\n')
-            numbered_lines = []
-            for i, line in enumerate(lines):
-                numbered_lines.append(f"{start_line + i:4d}: {line}")
-            code_with_line_numbers = '\n'.join(numbered_lines)
-        
+        if node.decorator_list:
+            # Include decorators so line numbers in the code match start_line
+            start_line = min(d.lineno for d in node.decorator_list)
+            code = '\n'.join(self.source_code.split('\n')[start_line - 1:end_line])
+
         return FunctionMetadata(
             name=node.name,
-            lookup_id=lookup_id,
+            lookup_id=self._make_lookup_id(node),
             file_path=self.file_path,
-            repository_name=repo_name,
-            module_name=module_name,
+            repository_name=self.repo_name,
+            module_name=self.module_name,
             nested_call_ids=[],
             start_line=start_line,
             end_line=end_line,
             code=code,
             is_async=isinstance(node, ast.AsyncFunctionDef),
-            class_context=self.current_class,
-            calls=calls,
-            imports=self.imports.copy(),
-            decorators=decorators,
-            error_handling=error_handling,
-            line_numbers=line_numbers,
-            file_name=file_name,
-            code_with_line_numbers=code_with_line_numbers
+            class_context=self.class_stack[-1] if self.class_stack else None,
+            calls=sorted({call.rpartition('.')[2] for call in qualified_calls}),
+            qualified_calls=qualified_calls,
+            imports=list(self.imports),
+            decorators=[self._get_decorator_name(d) for d in node.decorator_list],
+            error_handling=self._extract_error_handling(node),
+            file_name=os.path.basename(self.file_path)
         )
 
-    def _extract_calls(self, node: ast.FunctionDef) -> List[str]:
+    def _extract_calls(self, node) -> List[str]:
         calls = []
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 if isinstance(child.func, ast.Name):
-                    calls.append(child.func.id)
+                    call = child.func.id
                 elif isinstance(child.func, ast.Attribute):
-                    calls.append(child.func.attr)
-        return list(set(calls))
+                    receiver = child.func.value
+                    if isinstance(receiver, ast.Name):
+                        call = f"{receiver.id}.{child.func.attr}"
+                    else:
+                        call = f"<expr>.{child.func.attr}"
+                else:
+                    continue
+                if call not in calls:
+                    calls.append(call)
+        return calls
 
     def _get_decorator_name(self, decorator: ast.expr) -> str:
+        if isinstance(decorator, ast.Call):
+            decorator = decorator.func
         if isinstance(decorator, ast.Name):
             return decorator.id
-        elif isinstance(decorator, ast.Attribute):
+        if isinstance(decorator, ast.Attribute):
             return decorator.attr
-        elif isinstance(decorator, ast.Call):
-            if isinstance(decorator.func, ast.Name):
-                return decorator.func.id
-            elif isinstance(decorator.func, ast.Attribute):
-                return decorator.func.attr
         return "unknown"
 
-    def _extract_error_handling(self, node: ast.FunctionDef) -> Dict[str, Any]:
+    def _extract_error_handling(self, node) -> Dict[str, Any]:
         error_info = {'has_try_catch': False, 'error_types': [], 'try_catch_blocks': []}
-        
+        try_types = (ast.Try, ast.TryStar) if hasattr(ast, 'TryStar') else (ast.Try,)
+
         for child in ast.walk(node):
-            if isinstance(child, ast.Try):
+            if isinstance(child, try_types):
                 error_info['has_try_catch'] = True
                 try_catch_code = ast.get_source_segment(self.source_code, child)
                 if try_catch_code:
                     error_info['try_catch_blocks'].append(try_catch_code.strip())
-                
+
                 for handler in child.handlers:
-                    if handler.type and isinstance(handler.type, ast.Name):
-                        error_info['error_types'].append(handler.type.id)
-        
+                    error_info['error_types'].extend(self._handler_type_names(handler.type))
+
         return error_info
+
+    def _handler_type_names(self, handler_type: Optional[ast.expr]) -> List[str]:
+        if handler_type is None:
+            return ['BaseException']
+        if isinstance(handler_type, ast.Tuple):
+            return [name for elt in handler_type.elts for name in self._handler_type_names(elt)]
+        if isinstance(handler_type, ast.Name):
+            return [handler_type.id]
+        if isinstance(handler_type, ast.Attribute):
+            return [handler_type.attr]
+        return []
