@@ -1,340 +1,198 @@
-# Code Analysis Bot 🤖
+# Code Analysis Bot
 
-A sophisticated AI-powered code analysis system that processes repositories using two powerful approaches: **Call Graph Analysis** for relationship-based insights and **Function Lookup Tables** for fast searchable metadata. Provides intelligent issue analysis with advanced confidence scoring and multiple analysis strategies.
+Describe a bug in plain English and get back the functions most likely responsible, with `file:line` references, a confidence score and suggested fixes.
 
-## ✨ Key Features
+Code Analysis Bot indexes a Python repository function by function into OpenSearch, then answers questions about it with retrieval-augmented generation (RAG). It retrieves the functions that match your question, adds the functions they call, and asks an LLM to diagnose the problem from that code.
 
-- **📊 Call Graph Analysis**: Build and analyze function call relationships with configurable depth
-- **🔍 Multiple Analysis Approaches**: 
-  - Call Graph Analysis (relationship-based)
-  - Function Lookup Table (metadata-based fast search)
-  - Vector Search (semantic similarity with embeddings)
-  - Hybrid Approach (combined techniques)
-- **🤖 Multi-LLM Support**: OpenAI GPT, Perplexity, and Ollama integration
-- **🧠 Multi-Embedding Support**: OpenAI, Ollama, and Perplexity embeddings
-- **🔎 Semantic Vector Search**: Advanced search using OpenSearch with k-NN indexing
-- **📈 Confidence Scoring**: Interactive analysis with configurable confidence thresholds
-streamlit run ui/streamlit_app.py
+- Two retrieval approaches: **function lookup table** and **call graph**
+- OpenAI, Ollama (local) or Perplexity as the LLM
+- OpenAI or Ollama for embeddings (Perplexity optional, see [Configuration](#configuration))
+- Interactive CLI and a Streamlit web UI
+- Analysis history with statistics and JSON export
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph Index["1. Process repository (once)"]
+        A[Python repo] --> B[AST parser<br/>one chunk per function] --> C[Embedding model] --> D[(OpenSearch<br/>kNN index)]
+    end
+    subgraph Query["2. Analyze issue (per question)"]
+        E[Bug description] --> F[Query enhancer<br/>LLM adds terms] --> G[kNN search<br/>top 5 + callees] --> H[LLM analysis]
+        H -- "confidence < 0.8:<br/>fetch requested functions" --> G
+    end
+    D -.-> G
 ```
 
-## 📊 Analysis Approaches Comparison
+1. **Parse.** Every function and method is extracted with Python's `ast` module, along with its file, line range, class, decorators, calls, imports and `try/except` blocks. Tests and virtualenvs are skipped by default.
+2. **Link.** Calls are resolved to the functions they most likely target. `self.save()` resolves to `save` in the same class. A bare `helper()` resolves to the same module first, then to imported modules.
+3. **Embed and store.** Each function is embedded and written to OpenSearch. Re-processing a repository replaces its earlier documents.
+4. **Retrieve.** Your question is rewritten by an LLM into a better search query, embedded, and matched against the index with kNN search.
+5. **Expand.** Each hit brings along the functions it calls, so the LLM sees code beyond the snippet that merely *looks like* the bug report.
+6. **Generate.** The LLM returns an analysis with a confidence score. If confidence is below 0.8 and it names functions it still needs, those are fetched and the analysis runs again, up to 3 times.
 
-| Feature | Call Graph Analysis | Function Lookup Table | Vector Search | Hybrid |
-|---------|-------------------|---------------------|---------------|--------|
-| **Speed** | Medium (builds graph) | ⚡ Fast (indexed lookup) | Medium (embedding search) | Slower (combines all) |
-| **Accuracy** | High for dependencies | High for metadata matches | High for semantic similarity | Highest (comprehensive) |
-| **Memory Usage** | High (graph structure) | Low (tabular data) | Medium (embeddings) | High (all approaches) |
-| **Best For** | Code flow analysis | Quick function search | Conceptual similarity | Complex analysis |
-| **Handles** | Function relationships | Function metadata | Semantic meaning | All aspects |
-| **Setup Complexity** | Medium | Low | High (needs OpenSearch) | High |
+## Analysis approaches
 
-### 1. Call Graph Analysis 🕸️ (Relationship-Based)
+Both approaches use the same parser, query enhancer and analysis loop. They differ in what is embedded and how much surrounding code is gathered.
 
-**What it does:**
-- Builds a directed graph of function call relationships
-- Traces execution paths and dependency chains
-- Identifies critical functions and bottlenecks
-- Analyzes impact of changes across the codebase
+| | Function lookup table (default) | Call graph |
+| --- | --- | --- |
+| Embedding text | Name, file, module, class, decorators, calls and full code | Slimmer: name, module, class, main dependencies and key lines |
+| Context added to each hit | Functions it calls directly | Callees up to a configurable depth (1-5), plus call paths from entry points |
+| LLM prompt | Functions and their direct callees | Functions plus a call-graph summary; asks for graph insights |
+| Extras | Export the function table as JSON or CSV | Graph statistics: nodes, edges, entry points, depth |
+| Best for | Bugs inside one function or its direct callees | Bugs that cascade across several layers of calls |
+| OpenSearch index | `code_embeddings` | `call_graph_embeddings` |
 
-**Key Benefits:**
-- ✅ **Relationship Mapping**: Shows how functions interact
-- ✅ **Dependency Analysis**: Identifies what calls what
-- ✅ **Impact Assessment**: Predicts change consequences
-- ✅ **Critical Path Detection**: Finds important execution flows
-- ✅ **Cycle Detection**: Identifies recursive dependencies
+Each approach has its own index. After switching approach, process the repository again.
 
-**Best Use Cases:**
-- Understanding authentication flows
-- Analyzing database transaction chains
-- Finding error propagation paths
-- Refactoring impact analysis
+## Requirements
 
-**Example:**
+- Python 3.10+
+- OpenSearch 2.x with the k-NN plugin (included in the official image), for both approaches
+- One of:
+  - an OpenAI API key, or
+  - [Ollama](https://ollama.com) running locally with an embedding and a chat model pulled
+
+## Quick start
+
+**1. Start OpenSearch** (local development only: security is disabled).
+
 ```bash
-# Analyze JWT authentication flow
-Query: "JWT token validation is failing"
-Approach: call_graph
-Result: authenticate_user() → validate_token() → decode_jwt() → check_expiry()
-         Shows exact function call chain and dependencies
+docker run -d --name opensearch -p 9200:9200 \
+  -e discovery.type=single-node \
+  -e DISABLE_SECURITY_PLUGIN=true \
+  -e DISABLE_INSTALL_DEMO_CONFIG=true \
+  opensearchproject/opensearch:2.13.0
 ```
 
-### 2. Function Lookup Table 📋 (Metadata-Based)
+**2. Install.**
 
-**What it does:**
-- Creates searchable table of function metadata
-- Enables fast filtering by name, module, class, async status
-- Provides nested function relationship tracking
-- Supports CSV/JSON export for external analysis
-
-**Key Benefits:**
-- ⚡ **Lightning Fast**: Instant search results
-- 🔍 **Rich Filtering**: Search by multiple criteria
-- 📊 **Metadata Rich**: Function signatures, decorators, error handling
-- 💾 **Low Memory**: Efficient tabular storage
-- 📤 **Export Ready**: Easy data export and sharing
-- 🎯 **Precise Matching**: Exact metadata-based matching
-
-**Best Use Cases:**
-- Finding functions by name patterns
-- Locating async functions across codebase
-- Identifying error handling patterns
-- Quick function metadata lookup
-- Generating reports and documentation
-
-**Example:**
 ```bash
-# Find all authentication-related functions
-Query: "authentication"
-Approach: lookup_table
-Result: authenticate_user, auth_middleware, check_auth_token
-        Fast metadata-based matching with function details
+git clone https://github.com/RISHABH4SAHNI/Code_Analysis_Tool.git
+cd Code_Analysis_Tool
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env    # then add your OPENAI_API_KEY
 ```
 
-### 3. Vector Search 🔍 (Semantic Similarity)
-- Analyzes function relationships and dependencies
-- Traces call paths and identifies critical functions
-- Best for: Understanding code flow and dependency issues
-Result: Traces token validation → user lookup → database connection
+Using Ollama instead of OpenAI:
+
+```bash
+ollama pull nomic-embed-text
+ollama pull codellama:7b
 ```
 
-### 4. Hybrid Approach 🔄 (Best of All Worlds)
+Then choose `ollama` for the embedding and LLM services when prompted.
 
-**What it does:**
-- Combines call graph, lookup table, and vector search
-- Provides comprehensive multi-dimensional analysis
-- Cross-validates results across different approaches
-- Offers the most complete picture of code relationships
+**3. Run.**
 
-**Key Benefits:**
-- 🎯 **Comprehensive Coverage**: No blind spots
-- ✅ **Cross-Validation**: Results verified across approaches
-- 🧠 **Intelligent Fusion**: Combines strengths of each method
-- 📈 **Highest Accuracy**: Best overall analysis quality
-- 🔄 **Adaptive**: Chooses best approach per query type
+```bash
+python main_structured.py          # interactive CLI
+streamlit run ui/streamlit_app.py  # web UI at http://localhost:8501
+```
 
-**Trade-offs:**
-- ⏱️ Slower processing time
-- 💾 Higher memory usage
-- 🔧 More complex setup
+In the CLI, choose **1. Process Repository** and enter a path, then choose **2. Analyze Issue** and describe the problem. In the web UI, click **Initialize Services** in the sidebar, process a repository on the first tab, then ask a question on the second tab.
 
-## 🎯 Approach Selection Guide
+## Using it from Python
 
-### When to Use Call Graph Analysis
-- ✅ Analyzing code execution flows
-- ✅ Understanding function dependencies
-- ✅ Impact analysis for refactoring
-- ✅ Finding critical execution paths
-- ✅ Debugging interaction issues
-
-### When to Use Function Lookup Table
-- ⚡ Quick function discovery
-- 📊 Generating function reports
-- 🔍 Metadata-based filtering
-- 📤 Exporting function data
-- 🎯 Exact name/pattern matching
-
-### When to Use Vector Search
-- Semantic similarity search using embeddings
-- Finds conceptually related code regardless of call relationships
-- Best for: Finding similar functionality or patterns
-
-### When to Use Hybrid Approach
-- 🎯 Complex, multi-faceted issues
-- 🔍 Comprehensive code analysis
-- 📈 Maximum accuracy requirements
-- 🧠 Unknown problem types
-
-## 🛠️ Technical Implementation Details
-
-### Call Graph Implementation
 ```python
-from core.call_graph_processor import CallGraphProcessor
+from dotenv import load_dotenv
+from core.workflow_engine import WorkflowEngine
 
-processor = CallGraphProcessor()
-call_graph = processor.build_call_graph(functions)
-
-# Get function dependencies
-context = processor.get_function_context_with_dependencies(
-    target_function_id="func-123",
-    depth=3
+load_dotenv()
+engine = WorkflowEngine(
+    embedding_service_type="openai",   # or "ollama"
+    llm_service_type="openai",         # or "ollama", "perplexity"
+    analysis_approach="call_graph",    # or "function_lookup_table"
 )
 
-# Find execution paths
-paths = processor.get_call_paths_to_function("func-456", max_depth=5)
+stats = engine.process_repository("/path/to/repo")
+print(stats["total_functions"], stats["embedded_functions"])
+
+result = engine.analyze_user_issue(
+    "Login fails with a 500 error when the password is empty",
+    context={"repo_name": "my-app", "priority": "high", "call_graph_depth": 3},
+)
+print(result["confidence_score"])
+print(result["analysis"])
+for fix in result["suggested_fixes"]:
+    print("-", fix["description"])
 ```
 
-### Function Lookup Table Implementation
-```python
-from core.function_lookup import FunctionLookupTable
+Other useful calls:
 
-lookup = FunctionLookupTable()
-lookup.build_lookup_table(functions)
+- `engine.switch_analysis_approach(name)`: returns `True` if the repository needs processing again.
+- `engine.set_llm_service(name)`: switches the LLM without re-indexing.
+- `engine.export_function_lookup_table(path, "csv" or "json")`: lookup table approach only.
+- `engine.get_recent_analyses(10)` and `engine.get_analysis_history_stats()`.
 
-# Fast metadata search
-results = lookup.get_most_relevant_functions("authentication", limit=5)
+## Configuration
 
-# Get nested function calls
-nested = lookup.get_nested_functions("func-uuid-123")
+Settings are read from environment variables, or from a `.env` file in the project root.
 
-# Export for analysis
-lookup.export_to_json("function_data.json")
-lookup.export_to_csv("function_data.csv")
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | | Required for OpenAI embeddings or LLM |
+| `OPENAI_CHAT_MODEL` | `gpt-4o` | Model for query enhancement and analysis |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
+| `OPENAI_EMBEDDING_DIMENSIONS` | `3072` | Must match the embedding model |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
+| `OLLAMA_CHAT_MODEL` | `codellama:7b` | Ollama chat model |
+| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
+| `OLLAMA_EMBEDDING_DIMENSIONS` | `768` | Must match the embedding model |
+| `PERPLEXITY_API_KEY` | | Required for Perplexity |
+| `PERPLEXITY_CHAT_MODEL` | `sonar` | Perplexity chat model |
+| `PERPLEXITY_EMBEDDING_MODEL` | | Must be set to use Perplexity for embeddings |
+| `PERPLEXITY_EMBEDDING_DIMENSIONS` | `1024` | Must match that model |
+| `OPENSEARCH_HOST` / `OPENSEARCH_PORT` | `localhost` / `9200` | OpenSearch address |
+| `OPENSEARCH_USER` / `OPENSEARCH_PASSWORD` | `admin` / `admin` | OpenSearch credentials |
+| `OPENSEARCH_USE_SSL` / `OPENSEARCH_VERIFY_CERTS` | `false` / `false` | TLS settings |
+
+If you change the embedding model or dimensions, the index is recreated automatically the next time you process a repository.
+
+Tuning constants such as the confidence threshold (`0.8`), the number of re-analysis rounds (`3`), results per search (`5`) and skipped directories live in [config/settings.py](config/settings.py).
+
+## Project structure
+
+```
+main_structured.py            CLI entry point
+ui/                           Streamlit app and display components
+core/
+  workflow_engine.py          Orchestrates processing and analysis
+  repository_processor.py     AST extraction of functions and metadata
+  call_resolver.py            Maps calls to the functions they target
+  call_graph_processor.py     Builds and walks the call graph
+  function_lookup.py          Tabular function index with JSON/CSV export
+services/
+  embedding_service.py        OpenAI / Ollama / Perplexity embeddings
+  opensearch_base.py          Shared OpenSearch client and index management
+  vector_search_service.py    Lookup table approach search
+  call_graph_search_service.py  Call graph approach search
+  query_enhancement_service.py  LLM query rewriting
+  analysis_service.py         Prompting and response parsing
+factories/                    Builds the services for a chosen approach and provider
+models/                       Dataclasses for functions, search results and the graph
+utils/                        File discovery helpers and analysis history
+tests/                        pytest suite
 ```
 
-### Hybrid Analysis Implementation
-```python
-# The system automatically combines approaches
-engine = WorkflowEngine(analysis_approach="hybrid")
-result = engine.analyze_user_issue("Database timeout issues")
+## Development
 
-# Results include:
-# - Call graph dependency analysis
-# - Lookup table metadata matching  
-# - Vector search semantic similarity
-# - Fused confidence scoring
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
-## 📊 Performance Benchmarks
+The tests mock every external service, so they need neither API keys nor OpenSearch.
 
-### Processing Speed (1000 functions)
-- **Lookup Table**: ~0.1 seconds
-- **Call Graph**: ~2.5 seconds  
-- **Vector Search**: ~1.8 seconds
-- **Hybrid**: ~4.2 seconds
+## Limitations
 
-### Memory Usage (1000 functions)
-- **Lookup Table**: ~50MB
-- **Call Graph**: ~200MB
-- **Vector Search**: ~150MB
-- **Hybrid**: ~300MB
+- Only Python is analysed.
+- Call resolution is static and best-effort. Calls on arbitrary objects (`client.get()`) link to every function with that name, and dynamic dispatch is not followed.
+- The call graph is held in memory for the session that built it. The CLI and UI process a repository before analysing, so this matters only when using `WorkflowEngine` directly across restarts.
+- Confidence scores are the LLM's own estimate, not a measured accuracy.
 
-### Analysis Accuracy (based on validation tests)
-- **Lookup Table**: 85% (metadata matches)
-- **Call Graph**: 92% (relationship analysis)
-- **Vector Search**: 88% (semantic similarity)
-- **Hybrid**: 96% (combined validation)
-- Provides comprehensive analysis coverage
-- Best for: Complex issues requiring multiple perspectives
+## License
 
-
-# Process repository with call graph analysis
-result = engine.process_repository("/path/to/your/repo")
-
-# Different approaches provide different insights:
-if engine.analysis_approach == "call_graph":
-    print(f"Call graph depth: {result['call_graph_stats']['max_depth']}")
-    print(f"Root nodes: {result['call_graph_stats']['root_nodes']}")
-    
-elif engine.analysis_approach == "lookup_table":
-    print(f"Functions indexed: {result['lookup_stats']['total_functions']}")
-    print(f"Async functions: {result['lookup_stats']['async_functions']}")
-    
-else:  # hybrid
-    print(f"Comprehensive analysis complete with all approaches")
-print(f"Call graph depth: {result['call_graph_stats']['max_depth']}")
-
-# Analyze issue with context
-
-print(f"Confidence: {analysis['confidence_score']:.2f}")
-print(f"Analysis: {analysis['analysis']}")
-
-# Switch approaches dynamically
-engine.switch_analysis_approach("lookup_table")  # Fast metadata search
-quick_result = engine.analyze_user_issue("find async functions")
-
-engine.switch_analysis_approach("call_graph")    # Relationship analysis  
-detailed_result = engine.analyze_user_issue("trace authentication flow")
-```
-
-### Advanced Usage Examples
-
-```python
-# Export function lookup table for external analysis
-engine.export_function_lookup_table("functions.json", "json")
-engine.export_function_lookup_table("functions.csv", "csv")
-
-# Get analysis statistics
-stats = engine.get_analysis_history_stats()
-print(f"Total analyses: {stats['total_analyses']}")
-print(f"Average confidence: {stats['average_confidence']:.2f}")
-
-# Call graph specific operations
-if engine.analysis_approach == "call_graph":
-    # Find critical functions
-    critical_functions = engine.call_graph_processor.get_critical_functions()
-    
-    # Analyze impact of changes
-    impact = engine.call_graph_processor.analyze_change_impact("user_authentication")
-
-# Function lookup specific operations  
-elif engine.analysis_approach == "lookup_table":
-    # Get functions by pattern
-    auth_functions = engine.lookup_table.get_functions_by_pattern("auth*")
-    
-    # Export metadata summary
-    summary = engine.lookup_table.get_table_summary()
-```
-
-## 🔄 Analysis Workflow
-### 1. Repository Processing
-- **AST Parsing**: Extract function signatures, calls, imports, decorators
-- **Call Graph Construction**: Build directed graph of function relationships  
-- **Lookup Table Creation**: Build searchable metadata index
-- **Metadata Extraction**: Capture error handling, async patterns, class context
-- **Embedding Generation**: Create semantic embeddings using chosen service
-- **Index Creation**: Store in OpenSearch with optimized k-NN configuration
-
-### 2. Intelligent Issue Analysis
-
-#### Call Graph Analysis Path:
-- **Dependency Mapping**: Identify related functions through call relationships
-- **Path Tracing**: Follow execution flows to understand code behavior
-- **Impact Analysis**: Assess how changes propagate through the system
-
-#### Lookup Table Analysis Path:
-- **Metadata Matching**: Fast search through function attributes
-- **Pattern Recognition**: Find functions matching specific criteria
-- **Statistical Analysis**: Aggregate function characteristics
-
-#### Combined Analysis Path:
-- **Query Enhancement**: Expand user queries with technical context
-- **Multi-Modal Search**: Combine all approaches for comprehensive analysis
-- **Context Integration**: Include nested function calls and dependencies  
-- **Confidence Assessment**: Dynamic confidence scoring with iterative refinement
-- **Adaptive Analysis**: Choose best approach based on query type and confidence
-- **Solution Generation**: Provide detailed analysis with actionable recommendations
-
-## 🧩 Core Components
-- **📊 CallGraphProcessor**: Advanced call graph construction and analysis  
-- **🏭 ServiceFactory**: Flexible factory pattern for all services with hot-swapping
-- **🔍 CallGraphSearchService**: Relationship-based search with configurable depth
-- **📋 FunctionLookupTable**: Fast metadata-based function discovery
-- **🧠 VectorSearchService**: Semantic search with OpenSearch k-NN optimization
-- **📈 AnalysisService**: Confidence-based iterative analysis with context awareness
-- **✨ QueryEnhancementService**: Intelligent query expansion and technical context injection
-- **📚 HistoryManager**: Comprehensive analysis tracking with statistics and export
-
-
-## 🔗 Service Integration
-
-| Service | Analysis Model | Embedding Model | Use Case |
-## 📁 Project Structure Details
-
-- **📊 Call Graph Features**: Dependency analysis, critical path identification, impact assessment
-- **📋 Lookup Table Features**: Fast search, metadata filtering, export capabilities
-- **🔍 Search Capabilities**: Semantic similarity, relationship traversal, hybrid matching
-- **📈 Analytics**: Confidence scoring, analysis history, performance metrics
-- **🎨 UI Components**: Interactive CLI, responsive web interface, data visualization
-- **⚙️ Configuration**: Multi-environment support, service hot-swapping, parameter tuning
-
-
-
-## 🤝 Contributing
-
-
-- **[Setup Guide](docs/SETUP.md)**: Detailed installation and configuration
-- **[API Documentation](docs/API.md)**: Comprehensive API reference
-- **[Function Lookup Guide](docs/FUNCTION_LOOKUP.md)**: Lookup table approach deep dive
-- **[Call Graph Guide](docs/CALL_GRAPH.md)**: Call graph analysis deep dive
-- **[Demo Examples](demos/README.md)**: Sample data and usage examples
-
+[MIT](LICENSE)

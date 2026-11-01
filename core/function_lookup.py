@@ -4,6 +4,11 @@ import json
 from datetime import datetime
 from models.function_model import FunctionMetadata
 
+LOOKUP_COLUMNS = [
+    'function_name', 'lookup_id', 'nested_call_ids', 'file_name', 'repository_name', 'module_name',
+    'start_line', 'end_line', 'is_async', 'class_context', 'calls_count', 'has_error_handling'
+]
+
 class FunctionLookupTable:
     def __init__(self):
         self.functions: Dict[str, FunctionMetadata] = {}
@@ -18,7 +23,7 @@ class FunctionLookupTable:
                 'function_name': func.name,
                 'lookup_id': func.lookup_id,
                 'nested_call_ids': ','.join(func.nested_call_ids),
-                'file_name': func.file_path.split('/')[-1],
+                'file_name': func.file_name,
                 'repository_name': func.repository_name,
                 'module_name': func.module_name,
                 'start_line': func.start_line,
@@ -29,7 +34,7 @@ class FunctionLookupTable:
                 'has_error_handling': func.error_handling.get('has_try_catch', False)
             })
         
-        self.lookup_df = pd.DataFrame(table_data)
+        self.lookup_df = pd.DataFrame(table_data, columns=LOOKUP_COLUMNS)
 
     def get_function_by_id(self, lookup_id: str) -> Optional[FunctionMetadata]:
         return self.functions.get(lookup_id)
@@ -119,8 +124,8 @@ class FunctionLookupTable:
         
         return {
             'total_functions': len(self.lookup_df),
-            'async_functions': len(self.lookup_df[self.lookup_df['is_async'] == True]),
-            'functions_with_error_handling': len(self.lookup_df[self.lookup_df['has_error_handling'] == True]),
-            'unique_modules': self.lookup_df['module_name'].nunique(),
-            'unique_repositories': self.lookup_df['repository_name'].nunique()
+            'async_functions': int(self.lookup_df['is_async'].sum()),
+            'functions_with_error_handling': int(self.lookup_df['has_error_handling'].sum()),
+            'unique_modules': int(self.lookup_df['module_name'].nunique()),
+            'unique_repositories': int(self.lookup_df['repository_name'].nunique())
         }

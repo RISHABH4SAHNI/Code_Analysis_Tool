@@ -171,8 +171,10 @@ class HistoryManager:
                     history["analyses"] = history["analyses"][entries_to_remove:]
                     self.logger.info(f"Removed {entries_to_remove} old entries to maintain limit")
                 
+                # Based on the newest entry, so IDs stay unique after rotation trims old entries
+                last_id = max((a.get("id", 0) for a in history["analyses"]), default=0)
                 analysis_entry = {
-                    "id": history.get("total_analyses", 0) + 1,
+                    "id": max(last_id, history.get("total_analyses", 0)) + 1,
                     "timestamp": datetime.now().isoformat(),
                     "query": query.strip(),
                     "enhanced_query": enhanced_query.strip() if enhanced_query else query.strip(),
@@ -187,7 +189,7 @@ class HistoryManager:
                 }
                 
                 history["analyses"].append(analysis_entry)
-                history["total_analyses"] += 1
+                history["total_analyses"] = history.get("total_analyses", 0) + 1
                 history["last_updated"] = datetime.now().isoformat()
                 
                 self._save_history(history)
@@ -197,11 +199,12 @@ class HistoryManager:
                 raise
     
     def get_recent_analyses(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Most recent analyses first"""
         if limit <= 0:
             return []
         with self.lock:
             history = self._load_history()
-            return history["analyses"][-limit:]
+            return list(reversed(history["analyses"][-limit:]))
     
     def get_all_analyses(self) -> List[Dict[str, Any]]:
         with self.lock:
@@ -242,7 +245,8 @@ class HistoryManager:
                 "file_size_mb": round(self._get_file_size_mb(), 2)
             }
     
-    def export_history(self, output_file: str):
+    def export_history(self, output_file: str) -> str:
+        """Write the full history to output_file and return its absolute path"""
         if not output_file:
             raise ValueError("Output file path cannot be empty")
         with self.lock:
@@ -251,6 +255,7 @@ class HistoryManager:
                 with open(output_file, 'w', encoding='utf-8') as f:
                     json.dump(history, f, indent=2, ensure_ascii=False)
                 self.logger.info(f"History exported to {output_file}")
+                return str(Path(output_file).resolve())
             except Exception as e:
                 self.logger.error(f"Failed to export history: {e}")
                 raise

@@ -87,3 +87,7 @@ function_lookup*.csv
 
 # OpenSearch data
 opensearch_data/
+
+# Local virtualenv and runtime output
+.venv/
+analysis_history.json*

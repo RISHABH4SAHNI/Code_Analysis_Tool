@@ -28,21 +28,19 @@ def display_analysis_result(result: Dict[str, Any]):
     
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Original Query")
-        st.text_area("", value=result.get("query", ""), height=80, disabled=True)
+        st.text_area("Original Query", value=result.get("query", ""), height=80, disabled=True,
+                     key="result_original_query")
     with col2:
-        st.subheader("Enhanced Query")
-        st.text_area("", value=result.get("enhanced_query", result.get("query", "")), height=80, disabled=True)
+        st.text_area("Enhanced Query", value=result.get("enhanced_query", result.get("query", "")), height=80,
+                     disabled=True, key="result_enhanced_query")
     
     st.subheader("AI Analysis")
-    analysis_text = result.get("analysis", "No analysis available")
+    st.markdown(result.get("analysis") or "No analysis available")
     
-    if "ANALYSIS:" in analysis_text:
-        sections = analysis_text.split("ANALYSIS:")
-        if len(sections) > 1:
-            st.markdown(sections[1])
-    else:
-        st.markdown(analysis_text)
+    if result.get("suggested_fixes"):
+        st.subheader("Suggested Fixes")
+        for fix in result["suggested_fixes"]:
+            st.markdown(f"- {fix['description']}")
     
     if "search_results" in result and result["search_results"]:
         st.subheader("Relevant Functions")
@@ -60,11 +58,11 @@ def display_analysis_result(result: Dict[str, Any]):
             fig = px.bar(df, x="Function", y="Relevance Score", 
                         title="Function Relevance Scores",
                         hover_data=["File"])
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         
         for i, search_result in enumerate(result["search_results"], 1):
-            relevance_level = "High" if search_result.relevance_score > 0.8 else "Medium" if search_result.relevance_score > 0.5 else "Low"
-            with st.expander(f"[{relevance_level}] Function {i}: {search_result.function_metadata.name} (Score: {search_result.relevance_score:.3f})"):
+            label = "LLM-requested context" if search_result.match_type == "additional_context" else f"Score: {search_result.relevance_score:.3f}"
+            with st.expander(f"Function {i}: {search_result.function_metadata.name} ({label})"):
                 display_function_info(search_result)
 
 def display_function_info(search_result):
@@ -100,23 +98,33 @@ def display_function_info(search_result):
         st.write(f"**Error Handling:** {'Yes' if error_handling else 'No'}")
     
     if func.calls:
-        with st.expander(f"Function Calls ({len(func.calls)})"):
-            display_calls = func.calls[:10]
-            st.write(", ".join(display_calls))
-            if len(func.calls) > 10:
-                st.write(f"... and {len(func.calls) - 10} more")
+        more = f" ... and {len(func.calls) - 10} more" if len(func.calls) > 10 else ""
+        st.write(f"**Function Calls ({len(func.calls)}):** {', '.join(func.calls[:10])}{more}")
     
     st.markdown("**Source Code**")
-    st.code(func.code, language="python")
+    st.code(func.code or func.code_with_line_numbers, language="python")
     
-    if hasattr(search_result, 'nested_functions') and search_result.nested_functions:
-        st.markdown(f"**Nested Functions ({len(search_result.nested_functions)})**")
-        
-        for nested_id, nested_info in search_result.nested_functions.items():
-            with st.expander(f"Nested: {nested_info['function_name']}"):
-                st.write(f"**File:** {nested_info['file_path']}")
-                st.write(f"**Lines:** {nested_info['start_line']}-{nested_info['end_line']}")
-                st.code(nested_info['code'], language="python")
+    nested = getattr(search_result, 'nested_functions', None) or {}
+    graph_context = nested.get('call_graph_context')
+    if graph_context:
+        # Call graph approach: summary of the dependency walk
+        st.markdown("**Call Graph Context**")
+        st.write(f"**Dependencies ({graph_context.get('dependency_count', 0)}):** "
+                 f"{', '.join(graph_context.get('dependency_names', [])) or 'None'}")
+        st.write(f"**Graph depth:** {graph_context.get('graph_depth', 0)}")
+        st.write(f"**Files involved:** {', '.join(graph_context.get('files_involved', []))}")
+        st.write(f"**Call paths to this function:** {graph_context.get('call_paths_count', 0)}")
+        return
+    
+    # Lookup table approach: {lookup_id: {function_name, file_path, code, ...}}
+    nested_functions = {k: v for k, v in nested.items() if isinstance(v, dict) and 'function_name' in v}
+    if nested_functions:
+        st.markdown(f"**Nested Functions ({len(nested_functions)})**")
+        for nested_info in nested_functions.values():
+            # Streamlit does not allow an expander inside an expander
+            st.markdown(f"*{nested_info['function_name']}* - {nested_info['file_path']} "
+                        f"(lines {nested_info['start_line']}-{nested_info['end_line']})")
+            st.code(nested_info['code'], language="python")
 
 def display_repository_stats(stats: Dict[str, Any]):
     if not stats:
@@ -150,7 +158,7 @@ def display_repository_stats(stats: Dict[str, Any]):
         col1, col2 = st.columns(2)
         with col1:
             fig1 = px.pie(chart_data[:2], values="Count", names="Type", title="Function Types")
-            st.plotly_chart(fig1, use_container_width=True)
+            st.plotly_chart(fig1, width="stretch")
         with col2:
             fig2 = px.pie(chart_data[2:], values="Count", names="Type", title="Error Handling")
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")

@@ -58,7 +58,7 @@ class OpenAIEmbeddingService(EmbeddingService):
             raise ValueError("OpenAI API key is required")
         self.client = openai.OpenAI(api_key=api_key)
         self.model = OPENAI_CONFIG['model']
-        self.max_tokens = OPENAI_CONFIG.get('max_tokens', 8192)
+        self.max_tokens = OPENAI_CONFIG['embedding_max_tokens']
         self.timeout = OPENAI_CONFIG.get('timeout', 60)
         self.embedding_dimensions = OPENAI_CONFIG['embedding_dimensions']
     
@@ -71,7 +71,8 @@ class OpenAIEmbeddingService(EmbeddingService):
             return None
             
         context = self._build_context(function, include_metadata)
-        context = self._truncate_content(context, self.max_tokens * 4)
+        # Code averages roughly 3 characters per token; stay under the model's input limit
+        context = self._truncate_content(context, self.max_tokens * 3)
         return self._embed_text(context, f"function {function.name}")
 
     def create_query_embedding(self, query: str) -> Optional[List[float]]:
@@ -247,6 +248,11 @@ class PerplexityEmbeddingService(EmbeddingService):
         api_key = api_key or os.getenv('PERPLEXITY_API_KEY')
         if not api_key:
             raise ValueError("Perplexity API key is required")
+        if not PERPLEXITY_CONFIG['embedding_model']:
+            raise ValueError(
+                "Perplexity embeddings need PERPLEXITY_EMBEDDING_MODEL (and PERPLEXITY_EMBEDDING_DIMENSIONS) "
+                "set to a model your Perplexity account can use; otherwise choose openai or ollama embeddings"
+            )
         self.api_key = api_key
         self.base_url = PERPLEXITY_CONFIG['base_url']
         self.model = PERPLEXITY_CONFIG['embedding_model']

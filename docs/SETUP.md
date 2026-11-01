@@ -1,267 +1,160 @@
 # Setup Guide
 
-Complete setup guide for the Code Analysis Bot system with support for Call Graph Analysis, Function Lookup Tables, and Vector Search approaches.
+This guide takes you from a fresh clone to a first analysis, and covers each model provider and common problems. For what the tool does and how it works, see the [README](../README.md).
 
 ## Prerequisites
 
+| Requirement | Why |
+| --- | --- |
+| Python 3.10+ | Runs the tool |
+| OpenSearch 2.x with the k-NN plugin | Stores function embeddings. Both approaches need it |
+| Docker (optional) | Easiest way to run OpenSearch locally |
+| An OpenAI API key, or Ollama | Embeddings and analysis |
+
+## 1. Start OpenSearch
+
+### With Docker (recommended for local use)
+
+```bash
+docker run -d --name opensearch -p 9200:9200 \
+  -e discovery.type=single-node \
+  -e DISABLE_SECURITY_PLUGIN=true \
+  -e DISABLE_INSTALL_DEMO_CONFIG=true \
+  -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" \
+  opensearchproject/opensearch:2.13.0
+```
+
+This disables authentication and TLS. Use it only on your own machine.
+
+The node takes 20 to 60 seconds to start. Check it with:
+
+```bash
 curl http://localhost:9200
 ```
 
-**Note on OpenSearch Requirements:**
-- **Call Graph Analysis**: OpenSearch optional (can work without vector search)
-- **Function Lookup Table**: OpenSearch not required (uses in-memory tables)
-- **Vector Search**: OpenSearch required for embedding storage
-- **Hybrid Approach**: OpenSearch recommended for full functionality
+The reply should include `"number" : "2.13.0"`.
 
-### Quick Setup for Different Approaches
+### Existing or secured cluster
+
+Point the tool at it in `.env`:
 
 ```bash
-# Minimal setup for Function Lookup Table approach only
-# (No OpenSearch required)
+OPENSEARCH_HOST=search.example.com
+OPENSEARCH_PORT=9200
+OPENSEARCH_USER=admin
+OPENSEARCH_PASSWORD=your-password
+OPENSEARCH_USE_SSL=true
+OPENSEARCH_VERIFY_CERTS=true
+```
+
+The cluster must have the k-NN plugin, which the official OpenSearch distribution includes. Amazon OpenSearch Service domains also support k-NN.
+
+## 2. Install the tool
+
+```bash
+git clone https://github.com/RISHABH4SAHNI/Code_Analysis_Tool.git
+cd Code_Analysis_Tool
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-# Add only: OPENAI_API_KEY=your_key
-
-# Full setup for all approaches including Vector Search
-# (OpenSearch required)
-docker run -d --name opensearch -p 9200:9200 -p 9600:9600 \
-  -e "discovery.type=single-node" \
-  -e "plugins.security.disabled=true" \
-  opensearchproject/opensearch:2.3.0
-
-# Verify setup
-python main_structured.py  # Choose option 8 for System Diagnostics
 ```
 
-#### Option B: Local Installation
+## 3. Choose a model provider
 
-1. Download OpenSearch from [opensearch.org](https://opensearch.org/)
+You pick an **embedding service** and an **LLM service** separately when you start the tool. They can be different providers.
 
-## Verification
+### OpenAI
 
-### Test Different Analysis Approaches
-
-#### 1. Test Function Lookup Table (Fastest Setup)
+Add your key to `.env`:
 
 ```bash
-# Test the system with lookup table approach
+OPENAI_API_KEY=sk-...
+```
+
+The defaults are `text-embedding-3-large` (3072 dimensions) for embeddings and `gpt-4o` for analysis. Override them with `OPENAI_EMBEDDING_MODEL`, `OPENAI_EMBEDDING_DIMENSIONS` and `OPENAI_CHAT_MODEL`.
+
+### Ollama (local, no API key)
+
+Install [Ollama](https://ollama.com), then pull the default models:
+
+```bash
+ollama pull nomic-embed-text   # embeddings, 768 dimensions
+ollama pull codellama:7b       # analysis
+```
+
+If Ollama is not on `http://localhost:11434`, set `OLLAMA_BASE_URL`. To use other models, set `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBEDDING_MODEL` and `OLLAMA_EMBEDDING_DIMENSIONS`. The dimensions must match the embedding model.
+
+Small local models follow the structured answer format less reliably than hosted ones, so confidence scores and follow-up context requests work best with larger models.
+
+### Perplexity
+
+Perplexity can be used as the LLM service:
+
+```bash
+PERPLEXITY_API_KEY=pplx-...
+PERPLEXITY_CHAT_MODEL=sonar      # default
+```
+
+To use Perplexity for embeddings as well, also set `PERPLEXITY_EMBEDDING_MODEL` and `PERPLEXITY_EMBEDDING_DIMENSIONS` to a model your account can use. Without them, choosing Perplexity embeddings fails with an explanatory error.
+
+## 4. Verify the setup
+
+```bash
 python main_structured.py
-# Choose option 1 (Process Repository)
-# Select approach: lookup_table
-# Embedding service: openai
-# LLM service: openai
 ```
 
-This approach:
-- ✅ Works without OpenSearch
-- ⚡ Fast processing and search
-- 📊 Rich metadata analysis
-- 💾 Low memory usage
+Choose **8. System Diagnostics**. It shows installed packages, which keys are set and whether OpenSearch is reachable.
 
-#### 2. Test Call Graph Analysis
+To check the code itself:
 
 ```bash
-python main_structured.py
-# Choose option 1 (Process Repository) 
-# Select approach: call_graph
-# Embedding service: openai
-# LLM service: openai
+pip install -r requirements-dev.txt
+pytest
 ```
 
-This approach:
-- 🕸️ Builds function relationship graph
-- 🔍 Analyzes dependencies and call paths
-- 📈 Higher memory usage but powerful insights
-- ⚙️ Can work with or without OpenSearch
+The tests mock all external services, so they need no keys and no OpenSearch.
 
-#### 3. Test Full Vector Search
+## 5. First analysis
 
-```bash
-# Ensure OpenSearch is running first
-curl http://localhost:9200
+### CLI
 
-python main_structured.py
-# Choose option 1 (Process Repository)
-# Select approach: vector_search  
-# Embedding service: openai
-# LLM service: openai
-```
+1. Run `python main_structured.py`.
+2. Choose **1. Process Repository**. Pick an approach (`function_lookup_table` or `call_graph`), the embedding and LLM services, and the repository path.
+3. Choose **2. Analyze Issue** and describe the problem, for example: `Login fails with a 500 error when the password is empty`.
 
-This approach:
-- 🧠 Semantic similarity search
-- 🔍 Embedding-based matching
-- 📡 Requires OpenSearch for vector storage
+### Web UI
 
-### Test Installation
+1. Run `streamlit run ui/streamlit_app.py` and open http://localhost:8501.
+2. In the sidebar, pick the approach and services, then click **Initialize Services**.
+3. On **Repository Processing**, enter the path and click **Process Repository**.
+4. On **Issue Analysis**, describe the issue and click **Analyze Issue**.
 
-```bash
-- Check Python version compatibility
+Processing time is dominated by embedding calls: one per function. A repository with a few hundred functions takes a few minutes with OpenAI.
 
-## Performance Optimization
+## Tuning
 
-### Approach-Specific Optimization
+These constants are in [config/settings.py](../config/settings.py):
 
-#### Function Lookup Table Optimization
-```bash
-# For large repositories (>10,000 functions)
-export LOOKUP_TABLE_BATCH_SIZE=1000
-export ENABLE_LOOKUP_INDEXING=true
-export EXPORT_FORMAT_COMPRESSION=true
-```
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CONFIDENCE_THRESHOLD` | `0.8` | Below this, the tool fetches functions the LLM asks for and re-analyses |
+| `MAX_ANALYSIS_ITERATIONS` | `3` | Maximum re-analysis rounds |
+| `DEFAULT_FUNCTION_LIMIT` | `5` | Functions retrieved per question |
+| `MAX_CALL_GRAPH_DEPTH` | `3` | Default call depth for the call graph approach (UI and CLI allow 1-5) |
+| `EXCLUDED_DIRS` / `TEST_DIRS` | see file | Directories skipped when scanning a repository |
 
-Benefits:
-- Minimal memory footprint
-- Fast search operations
-- Efficient for metadata-heavy analysis
+Test files are skipped by default. Enable **Include test files** in the UI or answer `y` in the CLI to index them.
 
-#### Call Graph Optimization
-```bash
-# For complex repositories with deep call chains
-export MAX_CALL_GRAPH_DEPTH=5
-export ENABLE_GRAPH_CACHING=true
-export PRUNE_EXTERNAL_CALLS=true
-```
+## Troubleshooting
 
-Settings explanation:
-- `MAX_CALL_GRAPH_DEPTH`: Limits traversal depth (default: 10)
-- `ENABLE_GRAPH_CACHING`: Caches graph structures
-- `PRUNE_EXTERNAL_CALLS`: Excludes library calls
-
-#### Vector Search Optimization
-```bash
-# For better embedding performance
-export OPENSEARCH_BULK_SIZE=500
-export EMBEDDING_BATCH_SIZE=100
-export VECTOR_DIMENSION=1536  # for OpenAI embeddings
-```
-
-### For Large Repositories
-
-**Repository Size Guidelines:**
-
-| Repository Size | Recommended Approach | Setup Notes |
-|----------------|---------------------|-------------|
-| < 1,000 functions | Any approach | All work well |
-| 1,000 - 5,000 functions | Lookup Table or Call Graph | Vector search slower |
-| 5,000 - 10,000 functions | Lookup Table recommended | Call graph needs tuning |
-| > 10,000 functions | Lookup Table + selective Call Graph | Hybrid with depth limits |
-
-**Optimization strategies:**
-- Use Function Lookup Table for initial exploration
-- Use Call Graph for specific dependency analysis
-- Use Vector Search for semantic similarity when needed
-- Increase OpenSearch memory allocation
-- Process repositories in smaller chunks
-
-### Memory Usage by Approach
-
-```bash
-# Monitor memory usage during processing
-# Function Lookup Table: ~50MB per 1000 functions
-# Call Graph: ~200MB per 1000 functions  
-# Vector Search: ~150MB per 1000 functions
-# Hybrid: ~350MB per 1000 functions
-```
-
-### For Better Analysis
-
-**Approach Selection Strategy:**
-```bash
-# Start with Function Lookup Table for fast overview
-python main_structured.py  # approach: lookup_table
-
-# Switch to Call Graph for dependency analysis  
-python main_structured.py  # approach: call_graph
-
-# Use Vector Search for semantic similarity
-python main_structured.py  # approach: vector_search
-
-# Use Hybrid for comprehensive analysis
-python main_structured.py  # approach: hybrid
-```
-
-- Use GPT-4 for higher quality analysis
-- Combine multiple LLM providers for comparison
-- Tune confidence thresholds based on your needs
-
-## Next Steps
-
-1. Process your first repository
-2. **Experiment with approaches:**
-   - Start with Function Lookup Table (fastest)
-   - Try Call Graph Analysis (relationships)
-   - Test Vector Search (semantic similarity)
-   - Compare results with Hybrid approach
-3. **Try different LLM combinations:**
-   - OpenAI for production quality
-   - Perplexity for balanced performance  
-   - Ollama for local/offline processing
-4. **Export and analyze data:**
-   - Export function lookup tables (CSV/JSON)
-   - Export analysis history
-   - Generate function relationship reports
-5. **Customize for your needs:**
-   - Tune confidence thresholds
-   - Adjust call graph depth limits
-   - Configure approach-specific parameters
-
-## Approach-Specific Configuration
-
-### Function Lookup Table Configuration
-
-```bash
-# In .env file
-LOOKUP_TABLE_EXPORT_FORMAT=json  # json, csv, or both
-LOOKUP_INCLUDE_CODE_SNIPPETS=false  # Include function code
-LOOKUP_MAX_RESULTS_PER_QUERY=20
-LOOKUP_ENABLE_FUZZY_MATCHING=true
-```
-
-### Call Graph Configuration
-
-```bash
-# In .env file
-CALL_GRAPH_MAX_DEPTH=10
-CALL_GRAPH_INCLUDE_EXTERNAL=false
-CALL_GRAPH_DETECT_CYCLES=true
-CALL_GRAPH_PRUNE_LEAVES=false
-CALL_GRAPH_CACHE_RESULTS=true
-```
-
-### Vector Search Configuration
-
-```bash
-# In .env file
-OPENSEARCH_HOST=localhost:9200
-OPENSEARCH_INDEX_NAME=code_analysis
-VECTOR_DIMENSION=1536
-VECTOR_SIMILARITY_THRESHOLD=0.7
-ENABLE_HYBRID_SEARCH=true
-```
-
-## Development Setup
-
-### For Contributing to Different Approaches
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/on_call_bot.git
-cd on_call_bot
-
-# Setup development environment
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install -r requirements-dev.txt  # Additional dev dependencies
-
-# Test individual approaches
-pytest tests/test_function_lookup.py     # Lookup table tests
-pytest tests/test_call_graph_processor.py  # Call graph tests
-pytest tests/test_vector_search.py       # Vector search tests
-pytest tests/test_workflow_engine.py     # Integration tests
-
-# Run system diagnostics
-python main_structured.py  # Option 8: System Diagnostics
-```
-
-For more advanced configuration, see [CONFIGURATION.md](CONFIGURATION.md).
+| Symptom | Cause and fix |
+| --- | --- |
+| `ConnectionError` or "OpenSearch connection failed" | OpenSearch is not running or not reachable. Check `curl http://localhost:9200` and the `OPENSEARCH_*` settings |
+| "OpenAI API key is required" | `OPENAI_API_KEY` is missing from `.env` or the environment, and OpenAI is selected for embeddings or the LLM |
+| Index is recreated with a warning about dimensions | You changed the embedding model. This is expected; the index is rebuilt for the new size |
+| "No relevant functions found" | The repository has not been processed with the current approach in this session. Each approach has its own index |
+| "No Python functions found" | The path has no `.py` files outside skipped directories such as `tests/`, `venv/` and `build/` |
+| Files skipped during processing | Those files have syntax errors or are not UTF-8. The log lists each file and the error |
+| Ollama requests time out | The model is still loading or is too large for the machine. Pull a smaller model or raise `timeout` in `OLLAMA_CONFIG` |
+| Low confidence on every answer | Rephrase with concrete details: error messages, function or file names. Try the call graph approach for bugs that span several functions |

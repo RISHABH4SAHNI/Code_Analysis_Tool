@@ -4,11 +4,11 @@ from typing import Dict, Any, List
 def get_opensearch_config():
     return {
         "hosts": [{
-            "host": os.getenv('OPENSEARCH_HOST', 'localhost'), 
+            "host": os.getenv('OPENSEARCH_HOST', 'localhost'),
             "port": int(os.getenv('OPENSEARCH_PORT', 9200))
         }],
         "http_auth": (
-            os.getenv('OPENSEARCH_USER', 'admin'), 
+            os.getenv('OPENSEARCH_USER', 'admin'),
             os.getenv('OPENSEARCH_PASSWORD', 'admin')
         ),
         "use_ssl": os.getenv('OPENSEARCH_USE_SSL', 'false').lower() == 'true',
@@ -18,48 +18,47 @@ def get_opensearch_config():
         "retry_on_timeout": True
     }
 
-OPENSEARCH_CONFIG = {
-    "hosts": [{"host": "localhost", "port": 9200}],
-    "http_auth": ("admin", "admin"),
-    "use_ssl": False,
-    "verify_certs": False,
-    "timeout": 30,
-    "max_retries": 3,
-    "retry_on_timeout": True
-}
-
 OPENAI_CONFIG = {
-    "model": "text-embedding-3-large",
-    "embedding_dimensions": 3072,
-    "chat_model": "gpt-4",
+    "model": os.getenv('OPENAI_EMBEDDING_MODEL', "text-embedding-3-large"),
+    "embedding_dimensions": int(os.getenv('OPENAI_EMBEDDING_DIMENSIONS', '3072')),
+    # text-embedding-3-large accepts up to 8191 input tokens
+    "embedding_max_tokens": 8000,
+    "chat_model": os.getenv('OPENAI_CHAT_MODEL', "gpt-4o"),
     "max_tokens": 1500,
+    "enhancement_max_tokens": 200,
     "temperature": 0.1,
     "timeout": 60,
     "max_retries": 3
 }
 
 PERPLEXITY_CONFIG = {
-    "embedding_model": "text-embedding-3-large",
-    "chat_model": "llama-3.1-8b-instruct",
-    "embedding_dimensions": 3072,
+    # Perplexity's chat API does not serve the OpenAI embedding models, so the
+    # embedding model must be set explicitly to use Perplexity for embeddings
+    "embedding_model": os.getenv('PERPLEXITY_EMBEDDING_MODEL', ''),
+    "embedding_dimensions": int(os.getenv('PERPLEXITY_EMBEDDING_DIMENSIONS', '1024')),
+    "chat_model": os.getenv('PERPLEXITY_CHAT_MODEL', "sonar"),
     "base_url": "https://api.perplexity.ai",
-    "max_tokens": 1200,
-    "temperature": 0.1,
-    "timeout": 30,
-    "max_retries": 2
-}
-
-OLLAMA_CONFIG = {
-    "base_url": "http://localhost:11434",
-    "embedding_model": "nomic-embed-text",
-    "chat_model": "codellama:7b",
-    "embedding_dimensions": 768,
-    "max_tokens": 1200,
+    "max_tokens": 1500,
+    "enhancement_max_tokens": 200,
     "temperature": 0.1,
     "timeout": 60,
     "max_retries": 2
 }
 
+OLLAMA_CONFIG = {
+    "base_url": os.getenv('OLLAMA_BASE_URL', "http://localhost:11434"),
+    "embedding_model": os.getenv('OLLAMA_EMBEDDING_MODEL', "nomic-embed-text"),
+    "chat_model": os.getenv('OLLAMA_CHAT_MODEL', "codellama:7b"),
+    "embedding_dimensions": int(os.getenv('OLLAMA_EMBEDDING_DIMENSIONS', '768')),
+    "max_tokens": 1500,
+    "enhancement_max_tokens": 200,
+    "temperature": 0.1,
+    "timeout": 120,
+    "max_retries": 2
+}
+
+# The knn_vector dimension is a placeholder: the search services set it from the
+# active embedding service when they create the index
 INDEX_CONFIG = {
     "name": "code_embeddings",
     "settings": {
@@ -69,7 +68,6 @@ INDEX_CONFIG = {
     },
     "mappings": {
         "properties": {
-            "embedding": {"type": "dense_vector", "dims": 3072},
             "embedding_knn": {"type": "knn_vector", "dimension": 3072},
             "func_name": {"type": "keyword"},
             "lookup_id": {"type": "keyword"},
@@ -86,7 +84,7 @@ INDEX_CONFIG = {
             "class_context": {"type": "keyword"},
             "nested_call_ids": {"type": "keyword"},
             "decorators": {"type": "keyword"},
-            "error_handling": {"type": "object"},
+            "error_handling": {"type": "object", "enabled": False},
             "imports": {"type": "keyword"},
             "line_numbers": {"type": "integer"}
         }
@@ -95,7 +93,7 @@ INDEX_CONFIG = {
 
 CALL_GRAPH_CONFIG = {
     "index_name": "call_graph_embeddings",
-    "max_depth": 3,
+    "max_depth": 5,
     "settings": {
         "index": {"knn": True},
         "number_of_shards": 1,
@@ -103,7 +101,6 @@ CALL_GRAPH_CONFIG = {
     },
     "mappings": {
         "properties": {
-            "embedding": {"type": "dense_vector", "dims": 3072},
             "embedding_knn": {"type": "knn_vector", "dimension": 3072},
             "func_name": {"type": "keyword"},
             "lookup_id": {"type": "keyword"},
@@ -111,7 +108,10 @@ CALL_GRAPH_CONFIG = {
             "file_name": {"type": "keyword"},
             "repository_name": {"type": "keyword"},
             "module_name": {"type": "keyword"},
+            "code": {"type": "text"},
             "code_with_line_numbers": {"type": "text"},
+            "calls": {"type": "keyword"},
+            "nested_call_ids": {"type": "keyword"},
             "start_line": {"type": "integer"},
             "end_line": {"type": "integer"},
             "is_async": {"type": "boolean"},
@@ -140,7 +140,7 @@ ANALYSIS_APPROACH_CONFIG = {
         "key": "call_graph",
         "max_graph_depth": 3,
         "include_minimal_metadata": True,
-        "traverse_method": "dfs"
+        "traverse_method": "bfs"
     }
 }
 
@@ -162,14 +162,9 @@ HISTORY_BACKUP_COUNT = 3
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
-EXCLUDE_PATTERNS = [
-    r'test_.*\.py$',
-    r'.*_test\.py$',
-    r'.*/tests/.*',
-    r'.*/test/.*',
-    r'.*/__pycache__/.*',
-    r'.*/.git/.*',
-    r'.*/venv/.*',
-    r'.*/env/.*',
-    r'.*/node_modules/.*'
-]
+# Directory names skipped when scanning a repository for Python files
+EXCLUDED_DIRS = {
+    '.git', '.hg', '.svn', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.nox',
+    'venv', '.venv', 'env', '.env', 'virtualenv', 'site-packages', 'node_modules', 'build', 'dist', '.eggs'
+}
+TEST_DIRS = {'test', 'tests', 'testing'}

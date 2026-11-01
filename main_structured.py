@@ -26,18 +26,21 @@ class CodeAnalysisSystem:
     def display_banner(self):
         """Display system banner"""
         print("╔" + "═" * 58 + "╗")
-        print("║" + " " * 10 + "Code Analysis System - Restructured" + " " * 11 + "║")
+        print("║" + "Code Analysis System".center(58) + "║")
         print("╠" + "═" * 58 + "╣")
-        print("║  1. Process Repository                                 ║")
-        print("║  2. Analyze Issue                                      ║") 
-        print("║  3. Launch Streamlit UI                                ║")
-        print("║  4. Export Function Lookup Table                      ║")
-        print("║  5. Switch Analysis Approach                           ║")
-        print("║  6. View Analysis History                              ║")
-        print("║  7. Export Analysis History                            ║")
-        print("║  8. System Diagnostics                                 ║")
-        print("║  9. Clear Analysis History                             ║") 
-        print("║  0. Exit                                               ║")
+        for item in [
+            "1. Process Repository",
+            "2. Analyze Issue",
+            "3. Launch Streamlit UI",
+            "4. Export Function Lookup Table",
+            "5. Switch Analysis Approach",
+            "6. View Analysis History",
+            "7. Export Analysis History",
+            "8. System Diagnostics",
+            "9. Clear Analysis History",
+            "0. Exit",
+        ]:
+            print("║  " + item.ljust(56) + "║")
         print("╚" + "═" * 58 + "╝")
         print()
 
@@ -63,12 +66,13 @@ class CodeAnalysisSystem:
     def validate_services(self, embedding_service: str, llm_service: str) -> bool:
         """Validate if services are properly configured"""
         try:
-            # Check if required environment variables are set
-            if embedding_service == "openai" and not os.getenv('OPENAI_API_KEY'):
-                print("❌ OpenAI API key not found in environment variables")
+            # Both the embedding and the LLM provider may need an API key
+            providers = {embedding_service, llm_service}
+            if "openai" in providers and not os.getenv('OPENAI_API_KEY'):
+                print("❌ OPENAI_API_KEY not found in environment variables")
                 return False
-            if embedding_service == "perplexity" and not os.getenv('PERPLEXITY_API_KEY'):
-                print("❌ Perplexity API key not found in environment variables")
+            if "perplexity" in providers and not os.getenv('PERPLEXITY_API_KEY'):
+                print("❌ PERPLEXITY_API_KEY not found in environment variables")
                 return False
             return True
         except Exception as e:
@@ -150,13 +154,15 @@ class CodeAnalysisSystem:
             # Process repository
             try:
                 print("⏳ Processing repository... This may take a few minutes.")
-                result = self.workflow_engine.process_repository(repo_path)
+                result = self.workflow_engine.process_repository(repo_path, include_tests=include_tests)
                 
                 print("\n✅ Processing complete!")
                 print(f"📊 Results:")
                 print(f"   📝 Total functions: {result.get('total_functions', 0)}")
                 print(f"   💾 Embedded functions: {result.get('embedded_functions', 0)}")
                 print(f"   🎯 Approach: {result.get('approach', self.current_approach)}")
+                if result.get('skipped_files'):
+                    print(f"   ⚠️  Files skipped (could not be parsed): {result['skipped_files']}")
                 
                 total = result.get('total_functions', 0)
                 embedded = result.get('embedded_functions', 0)
@@ -202,9 +208,7 @@ class CodeAnalysisSystem:
             llm_service = input("LLM service (openai/perplexity/ollama) [current]: ").strip()
             if llm_service and llm_service in ["openai", "perplexity", "ollama"]:
                 try:
-                    # Update LLM service
-                    self.workflow_engine.analysis_service = self.service_factory.get_analysis_service(llm_service)
-                    self.workflow_engine.query_enhancer = self.service_factory.get_query_enhancer(llm_service)
+                    self.workflow_engine.set_llm_service(llm_service)
                     print(f"✅ Updated LLM service to {llm_service}")
                 except Exception as e:
                     print(f"⚠️  Failed to update LLM service: {e}")
@@ -275,7 +279,7 @@ class CodeAnalysisSystem:
 
                 print(f"\n🤖 AI ANALYSIS:")
                 print("-" * 60)
-                analysis_text = result.get('analysis', 'No analysis available')
+                analysis_text = result.get('analysis') or 'No analysis available'
                 print(analysis_text)
                 print("-" * 60)
                 
@@ -347,7 +351,7 @@ class CodeAnalysisSystem:
             output_file = input(f"Output file [{default_name}]: ").strip() or default_name
             
             print(f"📊 Exporting function lookup table...")
-            self.workflow_engine.export_function_lookup_table(output_file, export_format)
+            output_file = self.workflow_engine.export_function_lookup_table(output_file, export_format)
             
             # Verify file was created
             if os.path.exists(output_file):
@@ -385,9 +389,11 @@ class CodeAnalysisSystem:
             choice = input(f"\nSelect new approach ({'/'.join(SUPPORTED_APPROACHES)}): ").strip()
             if choice in SUPPORTED_APPROACHES and choice != self.workflow_engine.analysis_approach:
                 print(f"🔄 Switching to {choice} approach...")
-                self.workflow_engine.switch_analysis_approach(choice)
+                needs_reprocessing = self.workflow_engine.switch_analysis_approach(choice)
                 self.current_approach = choice
                 print(f"✅ Successfully switched to {choice} approach")
+                if needs_reprocessing:
+                    print("ℹ️  Each approach has its own index: run option 1 again before analyzing issues")
             elif choice == self.workflow_engine.analysis_approach:
                 print("ℹ️  Already using that approach")
             else:
@@ -458,7 +464,7 @@ class CodeAnalysisSystem:
             output_file = input(f"Output file [{default_name}]: ").strip() or default_name
             
             print("📊 Exporting analysis history...")
-            self.workflow_engine.history_manager.export_history(output_file)
+            output_file = self.workflow_engine.history_manager.export_history(output_file)
             
             if os.path.exists(output_file):
                 file_size = os.path.getsize(output_file)
@@ -493,11 +499,12 @@ class CodeAnalysisSystem:
         
         # Check environment variables
         print("\n🔑 Environment variables:")
-        env_vars = ['OPENAI_API_KEY', 'PERPLEXITY_API_KEY', 'OPENSEARCH_HOST']
+        env_vars = ['OPENAI_API_KEY', 'PERPLEXITY_API_KEY', 'OPENSEARCH_HOST', 'OLLAMA_BASE_URL']
         for var in env_vars:
             value = os.getenv(var)
             if value:
-                masked_value = value[:8] + "*" * (len(value) - 8) if len(value) > 8 else "*" * len(value)
+                # Show only a short prefix of secrets
+                masked_value = value if not var.endswith('_KEY') else value[:4] + "*" * 8
                 print(f"   ✅ {var}: {masked_value}")
             else:
                 print(f"   ❌ {var}: not set")
@@ -513,6 +520,7 @@ class CodeAnalysisSystem:
                 config['hosts'],
                 http_auth=config['http_auth'],
                 use_ssl=config['use_ssl'],
+                verify_certs=config['verify_certs'],
                 timeout=5
             )
             info = client.info()
@@ -558,7 +566,7 @@ class CodeAnalysisSystem:
         """Display troubleshooting information"""
         print("\n🔧 TROUBLESHOOTING:")
         print("• Ensure repository path is correct and contains Python files")
-        print("• Check that OpenSearch is running on localhost:9200")
+        print("• Check that OpenSearch is running (OPENSEARCH_HOST/OPENSEARCH_PORT, default localhost:9200)")
         print("• Verify API keys are properly configured in .env file")
         print("• Ensure network connectivity for external services")
         print("• Check Python package dependencies are installed")

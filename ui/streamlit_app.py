@@ -8,9 +8,12 @@ from typing import Optional, Dict, Any
 
 sys.path.append(str(Path(__file__).parent.parent))
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 from core.workflow_engine import WorkflowEngine
-from ui.components import display_analysis_result, display_function_info, display_repository_stats
-from config.settings import SUPPORTED_APPROACHES, DEFAULT_ANALYSIS_APPROACH
+from ui.components import display_analysis_result, display_repository_stats
+from config.settings import SUPPORTED_APPROACHES, DEFAULT_ANALYSIS_APPROACH, MAX_QUERY_LENGTH
 from utils.helpers import validate_repository_path, clean_error_message
 
 st.set_page_config(
@@ -22,7 +25,6 @@ st.set_page_config(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MAX_QUERY_LENGTH = 1000
 MAX_PATH_LENGTH = 500
 
 def initialize_session_state():
@@ -108,7 +110,11 @@ def render_sidebar():
                 index=0
             )
 
-        if st.button("Initialize Services", use_container_width=True):
+        engine = st.session_state.workflow_engine
+        if engine and engine.analysis_approach != st.session_state.current_approach:
+            st.warning("Approach changed. Click Initialize Services, then process the repository again.")
+
+        if st.button("Initialize Services", width="stretch"):
             initialize_services(embedding_service, llm_service)
 
         display_service_status()
@@ -142,8 +148,13 @@ def initialize_services(embedding_service: str, llm_service: str):
             else:
                 st.error("Service validation failed")
 
+            # A new engine has nothing indexed for this session yet
+            st.session_state.processing_complete = False
+            st.session_state.repo_stats = None
+
         except Exception as e:
             log_error("Failed to initialize services", e)
+            st.error(f"Failed to initialize services: {clean_error_message(str(e))}")
 
 def display_service_status():
     if st.session_state.service_validation:
@@ -199,10 +210,10 @@ def show_recent_analyses():
                 llm_svc = services.get('llm', 'unknown')
                 st.write(f"**Services:** {embedding_svc} + {llm_svc}")
 
-                with st.expander("Analysis Result"):
-                    result = analysis.get('analysis_result', 'No result available')
-                    display_text = result[:500] + "..." if len(result) > 500 else result
-                    st.write(display_text)
+                result = analysis.get('analysis_result') or 'No result available'
+                display_text = result[:500] + "..." if len(result) > 500 else result
+                st.markdown("**Analysis Result:**")
+                st.write(display_text)
 
 def export_analysis_history():
     output_file = f"analysis_history_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -213,8 +224,8 @@ def export_analysis_history():
         output_file
     )
 
-    if result is not None:
-        st.success(f"History exported to {output_file}")
+    if result:
+        st.success(f"History exported to {result}")
 
 def render_main_content():
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -259,21 +270,21 @@ def render_repository_processing_tab():
         process_btn = st.button(
             "Process Repository", 
             disabled=not st.session_state.workflow_engine,
-            use_container_width=True
+            width="stretch"
         )
     with col2:
         if st.session_state.processing_complete:
             st.success("Repository processed!")
 
     if process_btn:
-        process_repository(repo_path, include_tests, max_functions)
+        process_repository(repo_path, include_tests, int(max_functions))
 
 def process_repository(repo_path: str, include_tests: bool, max_functions: int):
     if not repo_path or not repo_path.strip():
         st.error("Please enter a repository path")
         return
 
-    repo_path = repo_path.strip()
+    repo_path = os.path.abspath(os.path.expanduser(repo_path.strip()))
 
     if not validate_repository_path(repo_path):
         st.error("Invalid repository path or no Python files found")
@@ -284,22 +295,18 @@ def process_repository(repo_path: str, include_tests: bool, max_functions: int):
 
     with st.spinner("Processing repository... This may take a few minutes."):
         try:
-            status_text.text("Scanning repository for Python files...")
+            status_text.text("Extracting functions and storing embeddings...")
             progress_bar.progress(10)
-
-            status_text.text("Extracting functions from repository...")
-            progress_bar.progress(30)
 
             result = safe_execute(
                 st.session_state.workflow_engine.process_repository,
                 "Repository processing failed",
-                repo_path
+                repo_path,
+                include_tests,
+                max_functions
             )
 
             if result:
-                progress_bar.progress(80)
-                status_text.text("Storing embeddings...")
-
                 progress_bar.progress(100)
                 status_text.text("Processing complete!")
 
@@ -308,7 +315,9 @@ def process_repository(repo_path: str, include_tests: bool, max_functions: int):
 
                 display_processing_results(result)
             else:
-                st.error("Repository processing failed")
+                progress_bar.empty()
+                status_text.empty()
+                display_troubleshooting_info()
 
         except Exception as e:
             log_error("Repository processing error", e)
@@ -329,6 +338,9 @@ def display_processing_results(result: Dict[str, Any]):
         st.metric("Success Rate", success_rate)
     with col4:
         st.metric("Approach", result.get("approach", "unknown"))
+
+    if result.get("skipped_files"):
+        st.warning(f"{result['skipped_files']} file(s) could not be parsed and were skipped (see logs)")
 
     if "summary" in result:
         display_repository_stats(result["summary"])
@@ -366,7 +378,8 @@ def render_issue_analysis_tab():
             tech_stack = st.text_input("Tech Stack (comma-separated)", max_chars=200)
         with col2:
             priority = st.selectbox("Priority", ["low", "medium", "high", "critical"])
-            if st.session_state.current_approach == "call_graph":
+            max_depth = None
+            if st.session_state.workflow_engine.analysis_approach == "call_graph":
                 max_depth = st.slider("Call Graph Depth", 1, 5, 3)
 
     context = {}
@@ -376,10 +389,10 @@ def render_issue_analysis_tab():
         context["tech_stack"] = [t.strip() for t in tech_stack.split(",")]
     if priority:
         context["priority"] = priority
-    if st.session_state.current_approach == "call_graph" and 'max_depth' in locals():
+    if max_depth is not None:
         context["call_graph_depth"] = max_depth
 
-    if st.button("Analyze Issue", disabled=not st.session_state.workflow_engine, use_container_width=True):
+    if st.button("Analyze Issue", disabled=not st.session_state.workflow_engine, width="stretch"):
         analyze_issue(user_query, context)
 
 def analyze_issue(user_query: str, context: Dict[str, Any]):
@@ -392,14 +405,8 @@ def analyze_issue(user_query: str, context: Dict[str, Any]):
 
     with st.spinner("Analyzing issue... This may take a minute."):
         try:
-            status_text.text("Enhancing query...")
-            progress_bar.progress(20)
-
-            status_text.text("Searching for relevant functions...")
-            progress_bar.progress(50)
-
-            status_text.text("Analyzing with AI...")
-            progress_bar.progress(80)
+            status_text.text("Enhancing query, searching functions and analyzing with AI...")
+            progress_bar.progress(10)
 
             result = safe_execute(
                 st.session_state.workflow_engine.analyze_user_issue,
@@ -428,13 +435,17 @@ def render_function_lookup_tab():
         st.warning("Please process a repository first")
         return
 
+    if st.session_state.workflow_engine.analysis_approach == "call_graph":
+        st.info("Lookup table export is only available with the function_lookup_table approach.")
+        return
+
     col1, col2 = st.columns(2)
 
     with col1:
         export_format = st.selectbox("Export Format", ["json", "csv"])
 
     with col2:
-        if st.button("Export Function Lookup Table", use_container_width=True):
+        if st.button("Export Function Lookup Table", width="stretch"):
             export_function_lookup_table(export_format)
 
     if st.session_state.repo_stats and "summary" in st.session_state.repo_stats:
@@ -453,9 +464,8 @@ def export_function_lookup_table(export_format: str):
             export_format
         )
 
-        if result is not None:
-            st.success(f"Function lookup table exported to {filename}")
-            st.info(f"File saved in the current directory: {filename}")
+        if result:
+            st.success(f"Function lookup table exported to {result}")
 
     except Exception as e:
         log_error("Export function lookup table failed", e)
@@ -479,7 +489,7 @@ def render_settings_tab():
     st.subheader("Configuration")
 
     if st.button("Reset Application State"):
-        for key in st.session_state.keys():
+        for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.success("Application state reset")
         st.rerun()
